@@ -4,10 +4,12 @@
         <title>DLNA投屏控制中心</title>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <script src="https://unpkg.com/vue@3.2.47"></script>
         <style>
             :root {
                 --primary: #2196f3;
                 --error: #f44336;
+                --success: #4caf50;
                 --background: #f5f5f5;
             }
             body {
@@ -24,22 +26,23 @@
                 margin: 10px 0;
                 box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
                 cursor: pointer;
-                transition: transform 0.2s;
+                transition: all 0.2s;
             }
             .device-card.selected {
                 border: 2px solid var(--primary);
                 transform: translateX(5px);
             }
-            .device-icon {
-                font-size: 24px;
-                margin-right: 15px;
+            .device-status {
+                width: 10px;
+                height: 10px;
+                border-radius: 50%;
+                margin-left: auto;
             }
-            #mediaUrl {
-                width: 100%;
-                padding: 12px;
-                border: 1px solid #ddd;
-                border-radius: 6px;
-                margin: 15px 0;
+            .device-status.online {
+                background: var(--success);
+            }
+            .device-status.offline {
+                background: var(--error);
             }
             button {
                 background: var(--primary);
@@ -50,6 +53,12 @@
                 cursor: pointer;
                 width: 100%;
                 font-size: 16px;
+                transition: opacity 0.2s;
+            }
+            button:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+                opacity: 0.7;
             }
             .toast {
                 position: fixed;
@@ -61,6 +70,7 @@
                 border-radius: 8px;
                 opacity: 0;
                 transition: opacity 0.3s;
+                max-width: 300px;
             }
             .toast.visible {
                 opacity: 1;
@@ -68,170 +78,245 @@
             .toast.error {
                 background: var(--error);
             }
+            .toast.success {
+                background: var(--success);
+            }
+            .loading {
+                display: inline-block;
+                width: 16px;
+                height: 16px;
+                border: 2px solid #fff;
+                border-radius: 50%;
+                border-top-color: transparent;
+                animation: spin 1s linear infinite;
+                vertical-align: middle;
+                margin-left: 8px;
+            }
+            @keyframes spin {
+                to {
+                    transform: rotate(360deg);
+                }
+            }
         </style>
     </head>
     <body>
-        <h1>DLNA投屏控制</h1>
-        <button
-            type="button"
-            onclick="discoverDevices()"
-            aria-label="刷新设备列表"
-        >
-            🔄 刷新设备列表
-        </button>
+        <div id="app">
+            <h1>DLNA投屏控制</h1>
 
-        <div id="devicesContainer"></div>
+            <div class="toolbar">
+                <button @click="discoverDevices" :disabled="isProcessing">
+                    🔄 刷新设备列表
+                    <span v-if="isProcessing" class="loading"></span>
+                </button>
+            </div>
 
-        <label style="display: block; margin: 15px 0">
-            <input
-                type="text"
-                id="mediaUrl"
-                placeholder="输入媒体地址 (例: https://example.com/video.mp4)"
-                aria-label="媒体文件地址"
-            />
-        </label>
+            <div class="devices-list">
+                <div
+                    v-for="device in devices"
+                    :key="device.controlURL"
+                    class="device-card"
+                    :class="{ selected: selectedDevice?.controlURL === device.controlURL }"
+                    @click="selectDevice(device)"
+                >
+                    <div class="device-content">
+                        <span class="device-icon"
+                            >{{ getDeviceIcon(device.type) }}</span
+                        >
+                        <div class="device-info">
+                            <div>{{ device.name }}</div>
+                            <div class="device-meta">
+                                {{ device.ip }} · {{ device.type }}
+                            </div>
+                        </div>
+                        <div
+                            class="device-status"
+                            :class="device.online ? 'online' : 'offline'"
+                        ></div>
+                    </div>
+                </div>
+                <div v-if="devices.length === 0" class="empty">
+                    未发现设备，请点击刷新
+                </div>
+            </div>
 
-        <button onclick="playMedia()">🚀 开始投屏</button>
+            <div class="media-control">
+                <input
+                    type="text"
+                    v-model="mediaUrl"
+                    placeholder="输入媒体地址 (例: http://example.com/video.mp4)"
+                    aria-label="媒体文件地址"
+                />
+                <button @click="playMedia" :disabled="!canPlay || isProcessing">
+                    🚀 开始投屏
+                    <span v-if="isProcessing" class="loading"></span>
+                </button>
+            </div>
 
-        <div id="toast" class="toast"></div>
+            <div class="toast" :class="[toast.type, { visible: toast.show }]">
+                {{ toast.message }}
+            </div>
+        </div>
 
         <script>
-            let ws = null;
-            let selectedDevice = null;
-            let devices = [];
+            const { createApp } = Vue;
 
-            // Toast提示系统
-            function showToast(message, type = 'info') {
-                const toast = document.getElementById('toast');
-                toast.textContent = message;
-                toast.className = `toast ${type} visible`;
-                setTimeout(() => toast.classList.remove('visible'), 3000);
-            }
-
-            // WebSocket初始化
-            function initWebSocket() {
-                if (ws) return;
-
-                const protocol =
-                    window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const host = window.location.hostname || 'localhost';
-                ws = new WebSocket(`${protocol}//${host}:3000`);
-
-                ws.onopen = () => {
-                    showToast('已连接到服务器');
-                    discoverDevices();
-                };
-
-                ws.onmessage = (event) => {
-                    const { type, data } = JSON.parse(event.data);
-                    if (type === 'devices') {
-                        devices = data;
-                        renderDevices();
-                    } else if (type === 'result') {
-                        showToast(
-                            data.success ? '投屏成功' : '投屏失败',
-                            data.success ? 'info' : 'error',
-                        );
-                    } else if (type === 'error') {
-                        showToast(`错误: ${data}`, 'error');
-                    }
-                };
-
-                ws.onerror = (error) => {
-                    showToast('连接服务器失败', 'error');
-                };
-            }
-
-            // 渲染设备列表
-            function renderDevices() {
-                const container = document.getElementById('devicesContainer');
-                container.innerHTML =
-                    devices
-                        .map(
-                            (device) => `
-        <div class="device-card ${
-            selectedDevice?.controlURL === device.controlURL ? 'selected' : ''
-        }" 
-             onclick="selectDevice('${device.controlURL}')">
-          <div style="display: flex; align-items: center;">
-            <span class="device-icon">${getDeviceIcon(device.type)}</span>
-            <div>
-              <div>${device.name}</div>
-              <div style="color: #666; font-size: 0.9em;">${device.ip}</div>
-              <div style="color: #999; font-size: 0.8em;">${
-                  device.controlURL
-              }</div>
-            </div>
-          </div>
-        </div>
-      `,
-                        )
-                        .join('') ||
-                    '<div style="text-align: center; color: #666;">未发现设备</div>';
-            }
-
-            // 设备选择
-            function selectDevice(controlURL) {
-                selectedDevice = devices.find(
-                    (d) => d.controlURL === controlURL,
-                );
-                renderDevices();
-            }
-
-            // 设备图标
-            function getDeviceIcon(type) {
-                const icons = {
-                    MediaRenderer: '📺',
-                    DMR: '🖥️',
-                    Speaker: '🔊',
-                };
-                return icons[type] || '🎮';
-            }
-
-            // 发现设备
-            function discoverDevices() {
-                if (!ws || ws.readyState !== WebSocket.OPEN) return;
-                selectedDevice = null;
-                ws.send(JSON.stringify({ type: 'discover' }));
-            }
-
-            // 投屏操作
-            function handlePlayResponse(response) {
-                if (response.error) {
-                    showToast(`投屏失败: ${response.error}`, 'error');
-                    return;
-                }
-                showToast('投屏成功，媒体正在加载...');
-                console.log('播放会话ID:', response.sessionId);
-            }
-
-            function playMedia() {
-                if (!selectedDevice) {
-                    showToast('请先选择设备', 'error');
-                    return;
-                }
-
-                const mediaURL = document
-                    .getElementById('mediaUrl')
-                    .value.trim();
-                if (!mediaURL.startsWith('http')) {
-                    showToast('请输入有效URL', 'error');
-                    return;
-                }
-
-                ws.send(
-                    JSON.stringify({
-                        type: 'play',
-                        data: {
-                            location: selectedDevice.location,
-                            mediaURL: mediaURL,
+            createApp({
+                data() {
+                    return {
+                        ws: null,
+                        devices: [],
+                        selectedDevice: null,
+                        mediaUrl: '',
+                        isProcessing: false,
+                        toast: {
+                            show: false,
+                            message: '',
+                            type: 'info',
                         },
-                    }),
-                );
-            }
+                    };
+                },
+                computed: {
+                    canPlay() {
+                        return (
+                            this.selectedDevice &&
+                            this.isValidURL(this.mediaUrl)
+                        );
+                    },
+                },
+                mounted() {
+                    this.initWebSocket();
+                },
+                beforeUnmount() {
+                    if (this.ws) {
+                        this.ws.close();
+                    }
+                },
+                methods: {
+                    initWebSocket() {
+                        const protocol =
+                            window.location.protocol === 'https:'
+                                ? 'wss:'
+                                : 'ws:';
+                        const host = window.location.hostname || 'localhost';
+                        this.ws = new WebSocket(`${protocol}//${host}:3000`);
 
-            // 初始化
-            window.onload = initWebSocket;
+                        this.ws.onopen = () => {
+                            this.showToast('已连接到服务器', 'success');
+                            this.discoverDevices();
+                        };
+
+                        this.ws.onmessage = (event) => {
+                            const { type, data } = JSON.parse(event.data);
+                            console.log('🚀 ~ initWebSocket ~ data:', data);
+                            switch (type) {
+                                case 'devices':
+                                    this.devices = data.map((d) => ({
+                                        ...d,
+                                        // 确保包含必要字段
+                                        location:
+                                            d.originalLocation || d.location,
+                                        controlURL: d.controlURL,
+                                        ip: d.ip,
+                                    }));
+                                    break;
+                                case 'result':
+                                    this.handlePlayResult(data);
+                                    break;
+                                case 'error':
+                                    this.showToast(`错误: ${data}`, 'error');
+                                    break;
+                            }
+                        };
+
+                        this.ws.onerror = (error) => {
+                            this.showToast('连接服务器失败', 'error');
+                        };
+
+                        this.ws.onclose = () => {
+                            setTimeout(() => this.initWebSocket(), 2000);
+                        };
+                    },
+
+                    discoverDevices() {
+                        if (!this.ws || this.ws.readyState !== WebSocket.OPEN)
+                            return;
+
+                        this.isProcessing = true;
+                        this.selectedDevice = null;
+                        this.ws.send(JSON.stringify({ type: 'discover' }));
+                        this.showToast('正在搜索设备...', 'info');
+                        setTimeout(() => (this.isProcessing = false), 1000);
+                    },
+
+                    selectDevice(device) {
+                        console.log('🚀 ~ selectDevice ~ device:', device);
+                        this.selectedDevice = device;
+                    },
+
+                    async playMedia() {
+                        if (!this.canPlay) return;
+
+                        this.isProcessing = true;
+                        try {
+                            // 发送完整设备对象
+                            this.ws.send(
+                                JSON.stringify({
+                                    type: 'play',
+                                    data: {
+                                        device: this.selectedDevice, // 传递完整设备对象
+                                        mediaURL: this.mediaUrl,
+                                    },
+                                }),
+                            );
+                        } catch (err) {
+                            this.showToast(`投屏失败: ${err.message}`, 'error');
+                            this.isProcessing = false;
+                        }
+                    },
+
+                    handlePlayResult(result) {
+                        this.isProcessing = false;
+                        if (result.success) {
+                            this.showToast(
+                                '投屏成功，设备正在加载媒体...',
+                                'success',
+                            );
+                        } else {
+                            this.showToast(
+                                `投屏失败: ${result.error || '未知错误'}`,
+                                'error',
+                            );
+                        }
+                    },
+
+                    showToast(message, type = 'info') {
+                        this.toast = { message, type, show: true };
+                        setTimeout(() => {
+                            this.toast.show = false;
+                        }, 3000);
+                    },
+
+                    isValidURL(url) {
+                        try {
+                            new URL(url);
+                            return url.startsWith('http');
+                        } catch {
+                            return false;
+                        }
+                    },
+
+                    getDeviceIcon(type) {
+                        const icons = {
+                            MediaRenderer: '📺',
+                            DMR: '🖥️',
+                            Speaker: '🔊',
+                            TV: '📺',
+                            Audio: '🎵',
+                        };
+                        return icons[type] || '🎮';
+                    },
+                },
+            }).mount('#app');
         </script>
     </body>
 </html>
