@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <title>DLNA投屏控制中心</title>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <style>
+            :root {
+                --primary: #2196f3;
+                --error: #f44336;
+                --background: #f5f5f5;
+            }
+            body {
+                font-family: Arial, sans-serif;
+                max-width: 800px;
+                margin: 20px auto;
+                padding: 20px;
+                background: var(--background);
+            }
+            .device-card {
+                background: white;
+                border-radius: 8px;
+                padding: 15px;
+                margin: 10px 0;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+                cursor: pointer;
+                transition: transform 0.2s;
+            }
+            .device-card.selected {
+                border: 2px solid var(--primary);
+                transform: translateX(5px);
+            }
+            .device-icon {
+                font-size: 24px;
+                margin-right: 15px;
+            }
+            #mediaUrl {
+                width: 100%;
+                padding: 12px;
+                border: 1px solid #ddd;
+                border-radius: 6px;
+                margin: 15px 0;
+            }
+            button {
+                background: var(--primary);
+                color: white;
+                border: none;
+                padding: 12px 24px;
+                border-radius: 6px;
+                cursor: pointer;
+                width: 100%;
+                font-size: 16px;
+            }
+            .toast {
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                background: #323232;
+                color: white;
+                padding: 16px 24px;
+                border-radius: 8px;
+                opacity: 0;
+                transition: opacity 0.3s;
+            }
+            .toast.visible {
+                opacity: 1;
+            }
+            .toast.error {
+                background: var(--error);
+            }
+        </style>
+    </head>
+    <body>
+        <h1>DLNA投屏控制</h1>
+        <button
+            type="button"
+            onclick="discoverDevices()"
+            aria-label="刷新设备列表"
+        >
+            🔄 刷新设备列表
+        </button>
+
+        <div id="devicesContainer"></div>
+
+        <label style="display: block; margin: 15px 0">
+            <input
+                type="text"
+                id="mediaUrl"
+                placeholder="输入媒体地址 (例: https://example.com/video.mp4)"
+                aria-label="媒体文件地址"
+            />
+        </label>
+
+        <button onclick="playMedia()">🚀 开始投屏</button>
+
+        <div id="toast" class="toast"></div>
+
+        <script>
+            let ws = null;
+            let selectedDevice = null;
+            let devices = [];
+
+            // Toast提示系统
+            function showToast(message, type = 'info') {
+                const toast = document.getElementById('toast');
+                toast.textContent = message;
+                toast.className = `toast ${type} visible`;
+                setTimeout(() => toast.classList.remove('visible'), 3000);
+            }
+
+            // WebSocket初始化
+            function initWebSocket() {
+                if (ws) return;
+
+                const protocol =
+                    window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const host = window.location.hostname || 'localhost';
+                ws = new WebSocket(`${protocol}//${host}:3000`);
+
+                ws.onopen = () => {
+                    showToast('已连接到服务器');
+                    discoverDevices();
+                };
+
+                ws.onmessage = (event) => {
+                    const { type, data } = JSON.parse(event.data);
+                    if (type === 'devices') {
+                        devices = data;
+                        renderDevices();
+                    } else if (type === 'result') {
+                        showToast(
+                            data.success ? '投屏成功' : '投屏失败',
+                            data.success ? 'info' : 'error',
+                        );
+                    } else if (type === 'error') {
+                        showToast(`错误: ${data}`, 'error');
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    showToast('连接服务器失败', 'error');
+                };
+            }
+
+            // 渲染设备列表
+            function renderDevices() {
+                const container = document.getElementById('devicesContainer');
+                container.innerHTML =
+                    devices
+                        .map(
+                            (device) => `
+        <div class="device-card ${
+            selectedDevice?.controlURL === device.controlURL ? 'selected' : ''
+        }" 
+             onclick="selectDevice('${device.controlURL}')">
+          <div style="display: flex; align-items: center;">
+            <span class="device-icon">${getDeviceIcon(device.type)}</span>
+            <div>
+              <div>${device.name}</div>
+              <div style="color: #666; font-size: 0.9em;">${device.ip}</div>
+              <div style="color: #999; font-size: 0.8em;">${
+                  device.controlURL
+              }</div>
+            </div>
+          </div>
+        </div>
+      `,
+                        )
+                        .join('') ||
+                    '<div style="text-align: center; color: #666;">未发现设备</div>';
+            }
+
+            // 设备选择
+            function selectDevice(controlURL) {
+                selectedDevice = devices.find(
+                    (d) => d.controlURL === controlURL,
+                );
+                renderDevices();
+            }
+
+            // 设备图标
+            function getDeviceIcon(type) {
+                const icons = {
+                    MediaRenderer: '📺',
+                    DMR: '🖥️',
+                    Speaker: '🔊',
+                };
+                return icons[type] || '🎮';
+            }
+
+            // 发现设备
+            function discoverDevices() {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                selectedDevice = null;
+                ws.send(JSON.stringify({ type: 'discover' }));
+            }
+
+            // 投屏操作
+            function handlePlayResponse(response) {
+                if (response.error) {
+                    showToast(`投屏失败: ${response.error}`, 'error');
+                    return;
+                }
+                showToast('投屏成功，媒体正在加载...');
+                console.log('播放会话ID:', response.sessionId);
+            }
+
+            function playMedia() {
+                if (!selectedDevice) {
+                    showToast('请先选择设备', 'error');
+                    return;
+                }
+
+                const mediaURL = document
+                    .getElementById('mediaUrl')
+                    .value.trim();
+                if (!mediaURL.startsWith('http')) {
+                    showToast('请输入有效URL', 'error');
+                    return;
+                }
+
+                ws.send(
+                    JSON.stringify({
+                        type: 'play',
+                        data: {
+                            location: selectedDevice.location,
+                            mediaURL: mediaURL,
+                        },
+                    }),
+                );
+            }
+
+            // 初始化
+            window.onload = initWebSocket;
+        </script>
+    </body>
+</html>
