@@ -207,7 +207,6 @@
 
                         this.ws.onmessage = (event) => {
                             const { type, data } = JSON.parse(event.data);
-                            console.log('🚀 ~ initWebSocket ~ data:', data);
                             switch (type) {
                                 case 'devices':
                                     this.devices = data.map((d) => ({
@@ -245,7 +244,7 @@
                         this.selectedDevice = null;
                         this.ws.send(JSON.stringify({ type: 'discover' }));
                         this.showToast('正在搜索设备...', 'info');
-                        setTimeout(() => (this.isProcessing = false), 1000);
+                        setTimeout(() => (this.isProcessing = false), 10000);
                     },
 
                     selectDevice(device) {

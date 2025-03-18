@@ -17,7 +17,7 @@ class DLNADiscoverer {
         });
     }
 
-    async discover(timeout = 5000) {
+    async discover(timeout = 10000) {
         const devices = new Map();
         const socket = dgram.createSocket('udp4');
         this.activeSockets.add(socket);
@@ -53,7 +53,7 @@ class DLNADiscoverer {
                 ].join('\r\n');
                 console.log('[Discovery] Sending search message');
 
-                socket.send(searchMsg, 1900, '239.255.255.250');
+                // socket.send(searchMsg, 1900, '239.255.255.250');
                 socket.send(searchMsg, 1900, '255.255.255.255');
 
                 timer = setTimeout(() => {
@@ -80,13 +80,6 @@ class DLNADiscoverer {
                                 if (key && value) acc[key] = value;
                                 return acc;
                             }, {});
-
-                        // 调试日志
-                        // console.log('[Discovery] Parsed headers:', {
-                        //     ...headers,
-                        //     rawMessage:
-                        //         msg.toString().substring(0, 200) + '...', // 截断长消息
-                        // });
 
                         if (!headers.location || devices.has(headers.location))
                             return;
@@ -149,10 +142,6 @@ class DLNADiscoverer {
                 );
                 return null;
             }
-            console.log(
-                '🚀 ~ DLNADiscoverer ~ parseDeviceDescription ~ location:',
-                location,
-            );
 
             const url = new URL(location);
 
@@ -172,7 +161,7 @@ class DLNADiscoverer {
         }
     }
 
-    // 新增URL验证方法
+    // URL验证方法
     isValidHttpUrl(url) {
         try {
             const parsed = new URL(url);
@@ -252,24 +241,52 @@ class DLNAController {
         });
     }
 
-    // 新增投屏核心方法
+    // 投屏核心方法
     async play(deviceLocation, mediaURL) {
         try {
+            // 参数验证
+            if (typeof deviceLocation?.location !== 'string') {
+                throw new Error('设备地址无效');
+            }
+
             // 获取设备详情
             const device = await this.getDeviceDetails(deviceLocation.location);
-            if (!device || !device.avTransport) {
+            if (!device?.avTransport) {
                 throw new Error('设备不支持投屏功能');
             }
 
-            const controlUrlFull = `http://${deviceLocation.ip}:${deviceLocation.port}${device.avTransport.controlURL}`;
+            // 生成控制URL（确保路径拼接正确）
+            const controlUrlFull = new URL(
+                device.avTransport.controlURL,
+                `http://${deviceLocation.ip}:${deviceLocation.port}`,
+            ).href;
 
-            // 设置媒体URI
+            // 构建标准DIDL-Lite元数据（修复属性粘连和protocolInfo）
+            const metaData = `
+<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" 
+          xmlns:dc="http://purl.org/dc/elements/1.1/"
+          xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"
+          xmlns:dlna="urn:schemas-dlna-org:metadata-1-0/">
+    <item id="1" parentID="0" restricted="1">
+        <dc:title>Streaming Video</dc:title>
+        <upnp:class>object.item.videoItem</upnp:class>
+        <res protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+            ${mediaURL.startsWith('http') ? `importUri="${mediaURL}"` : ''}>
+            ${mediaURL}
+        </res>
+    </item>
+</DIDL-Lite>`
+                .trim()
+                .replace(/\n\s+/g, '');
+
+            // 设置媒体URI（确保转义正确）
             await this.sendSoapRequest(
                 controlUrlFull,
                 device.avTransport.serviceType,
                 'SetAVTransportURI',
-                `<CurrentURI>${this.escapeXml(mediaURL)}</CurrentURI>
-                 <CurrentURIMetaData></CurrentURIMetaData>`,
+                `<InstanceID>0</InstanceID>
+<CurrentURI>${this.escapeXml(mediaURL)}</CurrentURI>
+<CurrentURIMetaData>${this.escapeXml(metaData)}</CurrentURIMetaData>`,
             );
 
             // 开始播放
@@ -277,7 +294,7 @@ class DLNAController {
                 controlUrlFull,
                 device.avTransport.serviceType,
                 'Play',
-                '<Speed>1</Speed>',
+                '<InstanceID>0</InstanceID><Speed>1</Speed>',
             );
 
             return { success: true };
@@ -288,10 +305,6 @@ class DLNAController {
     }
 
     async getDeviceDetails(location) {
-        console.log(
-            '🚀 ~ DLNAController ~ getDeviceDetails ~ location:',
-            location,
-        );
         try {
             const res = await fetch(location);
             const xml = await res.text();
@@ -327,10 +340,6 @@ class DLNAController {
             'Content-Length': Buffer.byteLength(soapEnvelope),
         };
 
-        console.log(
-            '🚀 ~ DLNAController ~ sendSoapRequest ~ soapEnvelope:',
-            soapEnvelope,
-        );
         const response = await fetch(controlURL, {
             method: 'POST',
             headers,
@@ -346,17 +355,16 @@ class DLNAController {
     }
 
     escapeXml(str) {
-        return str.replace(
-            /[<>&'"]/g,
-            (char) =>
-                ({
-                    '<': '&lt;',
-                    '>': '&gt;',
-                    '&': '&amp;',
-                    "'": '&apos;',
-                    '"': '&quot;',
-                }[char]),
-        );
+        return str.replace(/[&<>"']/g, function (match) {
+            const escape = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#x27;',
+            };
+            return escape[match];
+        });
     }
 
     findAVTransportService(serviceList) {
@@ -392,7 +400,7 @@ app.use(express.static('public'));
 app.get('/discover', async (req, res) => {
     try {
         console.log('[HTTP] Received discover request');
-        const devices = (await discoverer.discover(3000)).filter(Boolean);
+        const devices = (await discoverer.discover()).filter(Boolean);
         res.json(
             devices.map((d) => ({
                 name: d.name,
@@ -418,11 +426,10 @@ wss.on('connection', (ws) => {
     ws.on('message', async (message) => {
         try {
             const command = JSON.parse(message.toString());
-            console.log('🚀 ~ ws.on ~ command:', command);
             console.log(`[WS] Received command: ${command.type}`);
 
             if (command.type === 'discover') {
-                const devices = (await discoverer.discover(3000))
+                const devices = (await discoverer.discover())
                     .filter(Boolean)
                     .map((d) => ({
                         ...d,
